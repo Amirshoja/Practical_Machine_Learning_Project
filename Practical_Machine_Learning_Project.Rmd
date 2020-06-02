@@ -1,0 +1,204 @@
+---
+title: "Practical Machine Learning Project"
+author: "Amir Abbas Shojakhani"
+date: "5/30/2020"
+output: html_document
+---
+
+### Background
+##### Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+### Data
+##### The training dataset featured 19622 observations with 160 variables. The training data featured 1 outcome variable named "classe" and 159 predictors. The outcome was based on 5 factor levels:
+
+##### Class A: Exactly according to the specification
+
+##### Class B: Throwing the elbows to the front
+
+##### Class C: Lifting the dumbbell only halfway
+
+##### Class D: Lowering the dumbbell only halfway
+
+##### Class E: Throwing the hips to the front
+
+##### Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.
+
+##### The training data for this project are available here:
+##### The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har.
+
+### How the model was built
+##### A: Many of the variables in the dataset were summary columns and therefore had a lot of missing values. These variables were removed from our training data. We also check for Near Zero Variables and highly correlated predictors. As we were not using any time related data, all these columns were also removed along with other non-essential variables required for our prediction model.
+
+##### B: Cross-Validation was done by separating our training data into 2 separate data sets. 80% of the training data was used to create the prediction model and the remaining 20% of the training data was used to analyze our prediction accuracy. 
+
+##### C: Prediction models based on the classification tree model and the random forest model were created and tested for accuracy. The estimated out-of-sample errors were also taken into consideration before picking out our FINAL prediction model and method.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+library(caret)
+library(infotheo)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(dplyr)
+library(doParallel)
+library(rattle)
+```
+
+#### Load the training and testing data sets
+```{R}
+wlexercise_training <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", na.strings = c("NA", "#DIV/0!", ""))
+wlexercise_testing <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", na.strings = c("NA", "#DIV/0!", ""))
+```
+
+##### Next I noticed that some rows feature summaries such as max, min, avg and etc. of the rows above them(A certain training window). As these columns only show the summaries of each training window on the last row of each window, most of their columns DON'T have data. As I am not relaying on the averages of the data(In this project), I will remove those variables.
+```{R}
+sum_cols <- colnames(wlexercise_training)[colSums(is.na(wlexercise_training)) > 0]
+sum_cols_ind <- sapply(sum_cols, function(x) which(colnames(wlexercise_training) == x), USE.NAMES = FALSE)
+training_data <- wlexercise_training[, -(sum_cols_ind)]
+
+sum(complete.cases(training_data))
+```
+##### Good, we removed 100 variables and now all are rows are complete and we have no missing values.
+
+##### Some variables in our dataset are not required for this project, such as the user_name performing the exercise and any time related data as we are not performing any time series related tests. So will go ahead and remove them also.
+```{R}
+training_data <- training_data[, -(1 : 7)]
+```
+
+##### Down to 53 variables, lets just check and see if any have a Near Zero Var, as they will NOT be helpful in our prediction model.
+```{R}
+nearZeroVar(training_data)
+```
+
+##### Ok, nice to know there were NO variables with a Near Zero Var. Now let's check if any variables have a high correlation with each other(Higher than +/- 0.9). I have written a small function to check that.
+```{R}
+show_high_cor_vars <- function(dataset) {
+  for (i in 1 : (ncol(dataset) - 2)) {
+    for (j in (i + 1) : (ncol(dataset) - 1)) {
+      if (cor(dataset[, i], dataset[, j]) > 0.9 | cor(dataset[, i], dataset[, j]) < -0.9) {
+        print(paste0(colnames(dataset[i]), " has high Cor with " ,colnames(dataset[j]), ":" ,  cor(dataset[, i], dataset[, j])))
+        print("--------------------------")
+      }
+    }
+  }
+}
+show_high_cor_vars(training_data)
+```
+##### So we do have some variables that have pretty strong correlation with each other. This may make using both high correlated variables reduntent and even create some extra noise in our data and increase our Out of Sample Error. To decide which variables to keep between the 2 high correlated variables, I will use the "mutinformation" function from the "infotheo" package that will show which one of those variable, if used solely in our prediction model, will help us recognize more of the data.
+```{R}
+#Written a function to help me decide which variable has a higher mutinformation.
+choose_mutinfo_var <- function(predictor1, predictor2, outcome) {
+  mutinfo1 <- mutinformation(training_data[, outcome], discretize(training_data[, predictor1]))
+  mutinfo2 <- mutinformation(training_data[, outcome], discretize(training_data[, predictor2]))
+  ifelse(mutinfo1 >= mutinfo2, yes = paste(colnames(training_data[predictor1])), no = paste(colnames(training_data[predictor2])))
+}
+choose_mutinfo_var("roll_belt", "total_accel_belt", "classe") #Chose roll_belt, omitted total_accel_belt
+choose_mutinfo_var("roll_belt", "accel_belt_y", "classe") #Chose roll_belt, omitted accel_belt_y
+choose_mutinfo_var("roll_belt", "accel_belt_z", "classe") #Chose roll_belt, omitted accel_belt_z
+choose_mutinfo_var("pitch_belt", "accel_belt_x", "classe") #Chose pitch_belt, omitted accel_belt_x
+choose_mutinfo_var("gyros_arm_x", "gyros_arm_y", "classe") #Chose gyros_arm_x, omitted gyros_arm_y
+choose_mutinfo_var("gyros_dumbbell_x", "gyros_dumbbell_z", "classe") #Chose gyros_dumbbell_x, omitted gyros_dumbbell_z
+choose_mutinfo_var("gyros_dumbbell_x", "gyros_forearm_z", "classe") #Chose gyros_dumbbell_x, omitted gyros_forearm_z
+
+#creating a vector of the omit nominated variables to analyze later on our prediction model
+omit_vars <- c("total_accel_belt", "accel_belt_y", "accel_belt_z", "accel_belt_x", "gyros_arm_y", "gyros_dumbbell_z", "gyros_forearm_z")
+
+omit_vars_index <- sapply(omit_vars, function(x) which(colnames(training_data) == x), USE.NAMES = FALSE)
+training_data_omit <- training_data[, -(omit_vars_index)] #Copy of training dataset without omittted variables
+```
+
+##### Before starting to create the prediction model, Let's do a cross validation on our training data by separating it into 2 separate data sets to create the model on one part and test it's prediction accuracy on the other.
+
+##### I will create 2 separate sets of data, one including all the predictors and in the other one I will leave out the high correlated variables based on their mutual information importance we ranked before.
+```{R}
+set.seed(2468)
+
+#All 53 predictors
+intrain <- createDataPartition(y = training_data$classe, p = 0.8, list = FALSE)
+Training_data_train <- training_data[intrain, ]
+Training_data_test <- training_data[-intrain, ]
+
+#Leaving out high correlated variables
+intrain2 <- createDataPartition(y = training_data_omit$classe, p = 0.8, list = FALSE)
+Training_data_train2 <- training_data_omit[intrain2, ]
+Training_data_test2 <- training_data_omit[-intrain2, ]
+```
+
+### Creating a classification tree model
+```{R}
+rpart_1 <- rpart(classe ~ ., data = Training_data_train, method = "class")
+pred_rpart_1 <- predict(object = rpart_1, newdata = Training_data_test, type = "class")
+confusionMatrix(pred_rpart_1, Training_data_test$classe)
+
+prp(rpart_1)
+```
+
+```{R}
+rpart_2 <- rpart(classe ~ ., data = Training_data_train2, method = "class")
+pred_rpart_2 <- predict(object = rpart_2, newdata = Training_data_test2, type = "class")
+confusionMatrix(pred_rpart_2, Training_data_test2$classe)
+
+prp(rpart_2)
+```
+
+##### So our classification tree model with all variables shows 74.89% accuracy with all variables and 75.35% accuracy when leaving out some high correlated variables. Leaving out the high correlated variables that had less influence on our outcome variable DID have a benefit in this model. Using this model our estimated out of sample error would be around 25%
+
+### Creating a random forest prediction model
+```{R}
+#Using multi-core computation to speed up the prediction model
+cluster_no <- makeCluster(detectCores() - 2)
+registerDoParallel(cluster_no)
+
+set.seed(1359)
+rf_1 <- randomForest(classe ~ ., data = Training_data_train)
+
+stopCluster(cluster_no)
+registerDoSEQ()
+
+pred_rf_1 <- predict(object = rf_1, newdata = Training_data_test)
+confusionMatrix(pred_rf_1, Training_data_test$classe)
+```
+
+```{R}
+cluster_no <- makeCluster(detectCores() - 2)
+registerDoParallel(cluster_no)
+set.seed(1359)
+rf_2 <- randomForest(classe ~ ., data = Training_data_train2)
+
+stopCluster(cluster_no)
+registerDoSEQ()
+
+pred_rf_2 <- predict(object = rf_2, newdata = Training_data_test2)
+confusionMatrix(pred_rf_2, Training_data_test2$classe)
+```
+##### The random forest prediction model works very well with our data here. We predicted the data with over 99% accuracy. Interestingly in the random forest model, the model with all predictors had a higher accuracy than the model in which we omitted the high correlated variables(99.77% to 99.45%). So the FINAL MODEL we choose to predict on our test data is the random forest model with all the 53 variables. Our estimated out of sample error using this model would be less than 1%.
+
+### Prediction on the test dataset
+```{R}
+final_test_prediction <- predict(object = rf_1, newdata = wlexercise_testing)
+final_test_prediction
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
